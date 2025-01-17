@@ -9,247 +9,163 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import org.springframework.stereotype.Component;
 
 import java.util.*;
-import java.util.stream.Collectors;
 
-class VehicleExt extends Vehicle {
-    final double distance;
+class VehicleExt extends Vehicle{
+    double distance;
 
     public VehicleExt(Vehicle theVehicle, double distance) {
         super(theVehicle.getVehicleId(), theVehicle.getCapacity(), theVehicle.getCurrentLatitude(),
                 theVehicle.getCurrentLongitude(), theVehicle.getCurrentAddress());
         this.distance = distance;
     }
-
-    public Vehicle getParent() {
+    public Vehicle getParent(){
         return this;
     }
 }
-
 class OrderExt extends Order {
-    final int priority;
-    private double distance;
-
+    int priority;
+    double distance;
     public OrderExt(Order theOrder) {
         super(theOrder.getOrderId(), theOrder.getLatitude(), theOrder.getLongitude(),
                 theOrder.getAddress(), theOrder.getPackageWeight(), theOrder.getPriority());
+
         this.priority = convertPriorityToInt(theOrder.getPriority());
     }
 
-    public void setDistance(double distance) {
+    public void setDistance(Double distance){
         this.distance = distance;
     }
-
     public int getPriorityAsInt() {
         return this.priority;
     }
-
     @JsonIgnore
-    public Order getParent() {
+    public Order getParent(){
         return this;
     }
+    public void setPriority(int priority) {
+        this.priority = priority;
+    }
 
-    private static int convertPriorityToInt(String priority) {
-        if (priority == null) {
-            return Integer.MIN_VALUE;
+    private int convertPriorityToInt(String priority) {
+        if ("HIGH".equalsIgnoreCase(priority)) {
+            return 3;
+        } else if ("MEDIUM".equalsIgnoreCase(priority)) {
+            return 2;
+        } else if ("LOW".equalsIgnoreCase(priority)) {
+            return 1;
         }
-        return switch (priority.toUpperCase()) {
-            case "HIGH" -> 3;
-            case "MEDIUM" -> 2;
-            case "LOW" -> 1;
-            default -> Integer.MIN_VALUE;
-        };
+        return Integer.MAX_VALUE;
     }
 }
-
-class DeliveryPoint {
-    final double latitude;
-    final double longitude;
-    final OrderExt order;
-
-    DeliveryPoint(double latitude, double longitude, OrderExt order) {
-        this.latitude = latitude;
-        this.longitude = longitude;
-        this.order = order;
-    }
-}
-
 @Component
 public class Distributor {
+    List<Order> orderList;
+    List<Vehicle> vehicleList;
     private static final double EARTH_RADIUS = 6371;
-    private final List<Order> orderList;
-    private final List<Vehicle> vehicleList;
-
     public Distributor(List<Order> orderList, List<Vehicle> vehicleList) {
         this.orderList = orderList;
         this.vehicleList = vehicleList;
     }
-
     public DispatchPlan getDistribution() throws NotEnoughVehiclesException {
-        // Convert and prioritize orders
-        final List<OrderExt> prioritizedOrders = orderList.stream()
-                .map(OrderExt::new)
-                .sorted(Comparator.comparingInt(OrderExt::getPriorityAsInt).reversed()
-                        .thenComparingDouble(Order::getPackageWeight).reversed())
-                .collect(Collectors.toList());
-
-        // Initialize vehicle tracking
-        final Map<String, Integer> remainingCapacity = new HashMap<>();
-        final Map<String, List<OrderExt>> vehicleAssignments = new HashMap<>();
-
-        for (Vehicle vehicle : vehicleList) {
-            remainingCapacity.put(vehicle.getVehicleId(), vehicle.getCapacity());
-            vehicleAssignments.put(vehicle.getVehicleId(), new ArrayList<>());
+        List<OrderExt> orderWithPriority = new ArrayList<>();
+        int totalOrderWeight = 0;
+        for(int i=0; i<orderList.size(); i++){
+            totalOrderWeight+=orderList.get(i).getPackageWeight();
+            orderWithPriority.add(new OrderExt(orderList.get(i)));
         }
-
-        // Assign orders to vehicles
-        for (OrderExt order : prioritizedOrders) {
-            if (!assignOrder(order, vehicleAssignments, remainingCapacity)) {
-                throw new NotEnoughVehiclesException("Not enough vehicles available for order " + order.getOrderId());
+        Collections.sort(orderWithPriority, (o1, o2) -> Integer.compare(o2.priority, o1.priority));
+        Map<OrderExt,PriorityQueue<VehicleExt>> sortedMap = new LinkedHashMap<>();
+        for(int i=0; i<orderWithPriority.size(); i++){
+            OrderExt theOrder = orderWithPriority.get(i);
+            PriorityQueue<VehicleExt> pq = new PriorityQueue<>((v1, v2)->Double.compare(v1.distance, v2.distance));
+            for(int j=0; j<vehicleList.size(); j++){
+                Vehicle theVehicle = vehicleList.get(j);
+                double vehicleDistance = calculateHaversineDistance(theVehicle.getCurrentLatitude(),
+                        theVehicle.getCurrentLongitude(), theOrder.getLatitude(), theOrder.getLongitude());
+                pq.add(new VehicleExt(theVehicle, vehicleDistance));
             }
+            sortedMap.put(theOrder, pq);
         }
-
-        // Create final dispatch plan
-        return createDispatchPlan(vehicleAssignments, remainingCapacity);
-    }
-
-    private boolean assignOrder(OrderExt order,
-                                Map<String, List<OrderExt>> vehicleAssignments,
-                                Map<String, Integer> remainingCapacity) {
-        // First pass: Try nearest vehicle with sufficient capacity
-        final List<VehicleExt> sortedVehicles = getSortedVehiclesByDistance(order);
-
-        for (VehicleExt vehicle : sortedVehicles) {
-            final int currentCapacity = remainingCapacity.get(vehicle.getVehicleId());
-            if (currentCapacity >= order.getPackageWeight()) {
-                assignOrderToVehicle(order, vehicle, currentCapacity, vehicleAssignments, remainingCapacity);
-                return true;
-            }
+        HashMap<String, Integer> vehicleHash = new HashMap<>();
+        HashMap<String, Vehicle> vehiclePool = new HashMap<>();
+        HashMap<String, PriorityQueue<OrderExt>> assignedHash = new HashMap<>();
+        int totalVehicleCapacity = 0;
+        for(int j=0; j<vehicleList.size(); j++){
+            Vehicle theVehicle = vehicleList.get(j);
+            totalVehicleCapacity+=theVehicle.getCapacity();
+            vehicleHash.put(theVehicle.getVehicleId(), theVehicle.getCapacity());
+            PriorityQueue<OrderExt> pq = new PriorityQueue<>((o1, o2)->Double.compare(o1.distance, o2.distance));
+            assignedHash.put(theVehicle.getVehicleId(), pq);
+            vehiclePool.put(theVehicle.getVehicleId(), theVehicle);
         }
-
-        // Second pass: Try any vehicle with sufficient capacity
-        for (Vehicle vehicle : vehicleList) {
-            final int currentCapacity = remainingCapacity.get(vehicle.getVehicleId());
-            if (currentCapacity >= order.getPackageWeight()) {
-                final double distance = calculateHaversineDistance(
-                        vehicle.getCurrentLatitude(),
-                        vehicle.getCurrentLongitude(),
-                        order.getLatitude(),
-                        order.getLongitude()
-                );
-                final VehicleExt vehicleExt = new VehicleExt(vehicle, distance);
-                assignOrderToVehicle(order, vehicleExt, currentCapacity, vehicleAssignments, remainingCapacity);
-                return true;
-            }
+        if(totalVehicleCapacity<totalOrderWeight){
+            throw new NotEnoughVehiclesException("Sorry we don't have enough vehicles yet");
         }
-
-        return false;
-    }
-
-    private void assignOrderToVehicle(OrderExt order,
-                                      VehicleExt vehicle,
-                                      int currentCapacity,
-                                      Map<String, List<OrderExt>> vehicleAssignments,
-                                      Map<String, Integer> remainingCapacity) {
-        order.setDistance(vehicle.distance);
-        remainingCapacity.put(vehicle.getVehicleId(), currentCapacity - order.getPackageWeight());
-        vehicleAssignments.get(vehicle.getVehicleId()).add(order);
-    }
-
-    private List<VehicleExt> getSortedVehiclesByDistance(final OrderExt order) {
-        return vehicleList.stream()
-                .map(vehicle -> new VehicleExt(vehicle, calculateHaversineDistance(
-                        vehicle.getCurrentLatitude(),
-                        vehicle.getCurrentLongitude(),
-                        order.getLatitude(),
-                        order.getLongitude())))
-                .sorted(Comparator.comparingDouble(v -> v.distance))
-                .collect(Collectors.toList());
-    }
-
-    private DispatchPlan createDispatchPlan(final Map<String, List<OrderExt>> vehicleAssignments,
-                                            final Map<String, Integer> remainingCapacity) {
-        final DispatchPlan plan = new DispatchPlan();
-
-        vehicleAssignments.forEach((vehicleId, orders) -> {
-            if (!orders.isEmpty()) {
-                final Vehicle vehicle = vehicleList.stream()
-                        .filter(v -> v.getVehicleId().equals(vehicleId))
-                        .findFirst()
-                        .orElseThrow();
-
-                final double totalDistance = calculateTotalDistance(vehicle, new ArrayList<>(orders));
-                final int usedCapacity = vehicle.getCapacity() - remainingCapacity.get(vehicleId);
-
-                final List<Order> originalOrders = orders.stream()
-                        .map(OrderExt::getParent)
-                        .collect(Collectors.toList());
-
-                final VehicleAssignment assignment = new VehicleAssignment(vehicleId, usedCapacity,
-                        String.format("%.2f Km", totalDistance), originalOrders);
-                plan.add(assignment);
+        for(Map.Entry<OrderExt, PriorityQueue<VehicleExt>> entry : sortedMap.entrySet()){
+            OrderExt order = entry.getKey();
+            PriorityQueue<VehicleExt> vehicleQueue = entry.getValue();
+            boolean isAssigned = false;
+            while(!vehicleQueue.isEmpty()){
+                VehicleExt theVehicle = vehicleQueue.poll();
+                if(vehicleHash.get(theVehicle.getVehicleId())>=order.getPackageWeight()){
+                    vehicleHash.put(theVehicle.getVehicleId(),
+                            vehicleHash.get(theVehicle.getVehicleId())-order.getPackageWeight());
+                    order.setDistance(theVehicle.distance);
+                    PriorityQueue<OrderExt> pq = assignedHash.get(theVehicle.getVehicleId());
+                    pq.add(order);
+                    assignedHash.put(theVehicle.getVehicleId(), pq);
+                    isAssigned = true;
+                    break;
+                }
             }
-        });
+            if(!isAssigned){
+                throw new NotEnoughVehiclesException("Sorry we don't have enough vehicles yet");
+            }
 
+        }
+        DispatchPlan plan = new DispatchPlan();
+        for(String vehicleID:assignedHash.keySet()){
+            Vehicle theVehicle = vehiclePool.get(vehicleID);
+            PriorityQueue<OrderExt> pq = assignedHash.get(theVehicle.getVehicleId());
+            List<Order> orderList = new ArrayList<>();
+            String totalDistance = getTotalDistance(theVehicle, orderList, pq)+" Km";
+            int totalCapacity = theVehicle.getCapacity()-vehicleHash.get(theVehicle.getVehicleId());
+            VehicleAssignment assignedVehicle = new VehicleAssignment(theVehicle.getVehicleId(),
+                    totalCapacity, totalDistance, orderList);
+            plan.add(assignedVehicle);
+        }
         return plan;
+
     }
-
-    private double calculateTotalDistance(final Vehicle vehicle, final List<OrderExt> orders) {
-        if (orders.isEmpty()) {
-            return 0.0;
+    private double getTotalDistance(Vehicle theVehicle, List<Order> orderList, PriorityQueue<OrderExt> pq) {
+        double prevlat1 = theVehicle.getCurrentLatitude();
+        double prevlon1 = theVehicle.getCurrentLongitude();
+        double totalDistance = 0;
+        while(!pq.isEmpty()) {
+            OrderExt theOrder = pq.poll();
+            totalDistance += calculateHaversineDistance(prevlat1, prevlon1, theOrder.getLatitude(), theOrder.getLongitude());
+            prevlon1 = theOrder.getLongitude();
+            prevlat1 = theOrder.getLatitude();
+            orderList.add(theOrder);
         }
-
-        // Create starting point
-        final DeliveryPoint startPoint = new DeliveryPoint(
-                vehicle.getCurrentLatitude(),
-                vehicle.getCurrentLongitude(),
-                null
-        );
-
-        // Convert orders to delivery points
-        final List<DeliveryPoint> deliveryPoints = new ArrayList<>();
-        for (OrderExt order : orders) {
-            deliveryPoints.add(new DeliveryPoint(order.getLatitude(), order.getLongitude(), order));
-        }
-
-        // Sort delivery points by distance from start point
-        final DeliveryPoint finalStartPoint = startPoint;  // Need final reference for lambda
-        deliveryPoints.sort((p1, p2) -> Double.compare(
-                calculateHaversineDistance(finalStartPoint.latitude, finalStartPoint.longitude, p1.latitude, p1.longitude),
-                calculateHaversineDistance(finalStartPoint.latitude, finalStartPoint.longitude, p2.latitude, p2.longitude)
-        ));
-
-        // Calculate total route distance
-        double totalDistance = 0.0;
-        DeliveryPoint currentPoint = startPoint;
-
-        for (DeliveryPoint nextPoint : deliveryPoints) {
-            totalDistance += calculateHaversineDistance(
-                    currentPoint.latitude, currentPoint.longitude,
-                    nextPoint.latitude, nextPoint.longitude
-            );
-            currentPoint = nextPoint;
-        }
-
-        // Add return distance to start point
-        totalDistance += calculateHaversineDistance(
-                currentPoint.latitude, currentPoint.longitude,
-                startPoint.latitude, startPoint.longitude
-        );
-
+        totalDistance += calculateHaversineDistance(prevlat1, prevlon1,
+                theVehicle.getCurrentLatitude(), theVehicle.getCurrentLongitude());
         return totalDistance;
     }
+    private double calculateHaversineDistance(double lat1, double lon1, double lat2, double lon2) {
+        // Convert latitude and longitude to radians
+        double dLat = Math.toRadians(lat2 - lat1);
+        double dLon = Math.toRadians(lon2 - lon1);
+        lat1 = Math.toRadians(lat1);
+        lat2 = Math.toRadians(lat2);
 
-    private double calculateHaversineDistance(final double lat1, final double lon1,
-                                              final double lat2, final double lon2) {
-        final double dLat = Math.toRadians(lat2 - lat1);
-        final double dLon = Math.toRadians(lon2 - lon1);
-        final double lat1Rad = Math.toRadians(lat1);
-        final double lat2Rad = Math.toRadians(lat2);
-
-        final double a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-                Math.cos(lat1Rad) * Math.cos(lat2Rad) *
+        // Haversine formula
+        double a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                Math.cos(lat1) * Math.cos(lat2) *
                         Math.sin(dLon / 2) * Math.sin(dLon / 2);
 
-        return EARTH_RADIUS * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        double c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+        return EARTH_RADIUS * c;
     }
 }
